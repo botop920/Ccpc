@@ -114,7 +114,7 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
     selected_answers = []
     
     # We expect 4 columns. Let's divide the image width into 4 sections
-    width = warped.shape[1]
+    width = gray.shape[1]
     col_width = width // 4
     
     for col_idx in range(4):
