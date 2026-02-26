@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
@@ -9,6 +10,7 @@ import numpy as np
 import cv2
 import imutils
 from imutils.perspective import four_point_transform
+from imutils import contours
 
 app = FastAPI(title="OMR Checker API")
 
@@ -46,12 +48,12 @@ class GradingResponse(BaseModel):
     total_marks: float
     obtained_marks: float
     results: List[OMRResult]
+    processed_image_base64: Optional[str] = None
 
-def process_omr_image(image_bytes: bytes, num_questions: int, num_choices: int = 4):
+def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices: int = 4):
     """
-    Process the OMR image using OpenCV.
-    This is a basic implementation. You may need to tune parameters
-    based on your specific OMR sheet design.
+    Process the specific 100 MCQ OMR sheet with 4 columns.
+    Returns the selected answers and a base64 encoded image showing what was detected.
     """
     # 1. Load image
     nparr = np.frombuffer(image_bytes, np.uint8)
@@ -64,7 +66,7 @@ def process_omr_image(image_bytes: bytes, num_questions: int, num_choices: int =
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edged = cv2.Canny(blurred, 75, 200)
 
-    # 3. Find contours (the document/paper)
+    # 3. Find the document (paper)
     cnts = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = imutils.grab_contours(cnts)
     docCnt = None
@@ -79,7 +81,7 @@ def process_omr_image(image_bytes: bytes, num_questions: int, num_choices: int =
                 break
 
     if docCnt is None:
-        # Fallback: assume the whole image is the document if no clear border is found
+        # Fallback: assume the whole image is the document
         height, width = image.shape[:2]
         docCnt = np.array([
             [[0, 0]],
@@ -91,87 +93,130 @@ def process_omr_image(image_bytes: bytes, num_questions: int, num_choices: int =
     # 4. Apply perspective transform
     paper = four_point_transform(image, docCnt.reshape(4, 2))
     warped = four_point_transform(gray, docCnt.reshape(4, 2))
+    
+    # Resize to a standard size to make bubble detection consistent
+    warped = cv2.resize(warped, (800, 1131)) # A4 ratio
+    paper = cv2.resize(paper, (800, 1131))
 
     # 5. Thresholding (binarization)
     thresh = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
 
-    # 6. Find bubbles (contours of the filled circles)
-    cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 6. Find all circular contours (bubbles)
+    cnts = cv2.findContours(thresh.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     cnts = imutils.grab_contours(cnts)
-    questionCnts = []
-
+    
+    raw_bubbles = []
     for c in cnts:
         (x, y, w, h) = cv2.boundingRect(c)
         ar = w / float(h)
-        # Filter contours based on size and aspect ratio to find bubbles
-        # Made more forgiving for different image sizes and resolutions
-        if w >= 15 and h >= 15 and ar >= 0.7 and ar <= 1.3:
+        # Filter for bubbles: roughly circular, specific size range
+        if 10 <= w <= 45 and 10 <= h <= 45 and 0.6 <= ar <= 1.4:
+            raw_bubbles.append(c)
+
+    # Remove duplicate contours (inner/outer rings of the same bubble)
+    questionCnts = []
+    for c in raw_bubbles:
+        (x, y, w, h) = cv2.boundingRect(c)
+        is_duplicate = False
+        for qc in questionCnts:
+            (qx, qy, qw, qh) = cv2.boundingRect(qc)
+            if abs(x - qx) < 10 and abs(y - qy) < 10:
+                is_duplicate = True
+                break
+        if not is_duplicate:
             questionCnts.append(c)
 
     if len(questionCnts) == 0:
-        raise ValueError("No bubbles found on the OMR sheet. Please ensure the image is clear and the OMR format is supported.")
+        # Return the thresholded image so the user can see what went wrong
+        _, buffer = cv2.imencode('.jpg', thresh)
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+        return [], img_base64
 
-    # Sort contours top-to-bottom
-    from imutils import contours
-    questionCnts = contours.sort_contours(questionCnts, method="top-to-bottom")[0]
-    
+    # Draw ALL detected bubbles in RED for debugging
+    cv2.drawContours(paper, questionCnts, -1, (0, 0, 255), 2)
+
+    # 7. Sort and Group into 4 Columns (25 questions each)
     selected_answers = []
     
-    # Group bubbles into rows based on Y-coordinate proximity
-    rows = []
-    current_row = [questionCnts[0]]
+    # We expect 4 columns. Let's divide the image width into 4 sections
+    width = warped.shape[1]
+    col_width = width // 4
     
-    for c in questionCnts[1:]:
-        _, y1, _, h1 = cv2.boundingRect(current_row[-1])
-        _, y2, _, _ = cv2.boundingRect(c)
-        
-        # If the Y difference is small, they belong to the same row
-        if abs(y1 - y2) < (h1 / 1.5):
-            current_row.append(c)
-        else:
-            rows.append(current_row)
-            current_row = [c]
-    rows.append(current_row)
-    
-    # Process each row to find the filled bubble
-    for i, row in enumerate(rows):
-        if i >= num_questions:
-            break # Stop if we've processed all questions
-            
-        # Sort the row left-to-right (A, B, C, D)
-        row = contours.sort_contours(row, method="left-to-right")[0]
-        
-        bubbled = None
-        
-        for (j, c) in enumerate(row):
-            if j >= num_choices:
-                break # Only look at the first `num_choices` bubbles
+    for col_idx in range(4):
+        # Filter bubbles that fall into this column
+        col_bubbles = []
+        for c in questionCnts:
+            (x, y, w, h) = cv2.boundingRect(c)
+            if x >= col_idx * col_width and x < (col_idx + 1) * col_width:
+                col_bubbles.append(c)
                 
-            # Create a mask for the current bubble
-            mask = np.zeros(thresh.shape, dtype="uint8")
-            cv2.drawContours(mask, [c], -1, 255, -1)
+        if len(col_bubbles) == 0:
+            # Pad with empty answers if column is missing
+            selected_answers.extend([-1] * 25)
+            continue
             
-            # Apply the mask to the thresholded image and count non-zero pixels
-            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-            total = cv2.countNonZero(mask)
+        # Sort column bubbles top-to-bottom
+        col_bubbles = contours.sort_contours(col_bubbles, method="top-to-bottom")[0]
+        
+        # Group into rows (questions)
+        rows = []
+        current_row = [col_bubbles[0]]
+        
+        for c in col_bubbles[1:]:
+            _, y1, _, h1 = cv2.boundingRect(current_row[-1])
+            _, y2, _, _ = cv2.boundingRect(c)
             
-            # If the current bubble has more filled pixels than the previous max, update it
-            if bubbled is None or total > bubbled[0]:
-                bubbled = (total, j)
+            # If Y difference is small, it's the same row
+            if abs(y1 - y2) < h1:
+                current_row.append(c)
+            else:
+                rows.append(current_row)
+                current_row = [c]
+        rows.append(current_row)
+        
+        # Process each row (up to 25 questions per column)
+        for i, row in enumerate(rows):
+            if i >= 25: break # Max 25 questions per column
+            
+            # Sort left-to-right (A, B, C, D)
+            row = contours.sort_contours(row, method="left-to-right")[0]
+            
+            bubbled = None
+            for (j, c) in enumerate(row):
+                if j >= num_choices: break
                 
-        # Append the index of the most filled bubble
-        if bubbled is not None:
-            selected_answers.append(bubbled[1])
-        else:
+                mask = np.zeros(thresh.shape, dtype="uint8")
+                cv2.drawContours(mask, [c], -1, 255, -1)
+                mask = cv2.bitwise_and(thresh, thresh, mask=mask)
+                total = cv2.countNonZero(mask)
+                
+                if bubbled is None or total > bubbled[0]:
+                    bubbled = (total, j, c)
+                    
+            # Threshold for "filled" bubble (e.g., at least 120 pixels filled)
+            if bubbled is not None and bubbled[0] > 120:
+                selected_answers.append(bubbled[1])
+                # Draw the selected bubble in GREEN
+                cv2.drawContours(paper, [bubbled[2]], -1, (0, 255, 0), 3)
+            else:
+                selected_answers.append(-1)
+                
+        # Pad if less than 25 rows found
+        while len(selected_answers) < (col_idx + 1) * 25:
             selected_answers.append(-1)
-            
-    # Pad with -1 if we didn't find enough rows
-    while len(selected_answers) < num_questions:
-        selected_answers.append(-1)
+
+    # Ensure exactly 100 answers
+    selected_answers = selected_answers[:100]
 
     # Map indices to letters (0 -> A, 1 -> B, etc.)
-    options_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E", -1: None}
-    return [options_map.get(idx, None) for idx in selected_answers]
+    options_map = {0: "A", 1: "B", 2: "C", 3: "D", -1: None}
+    final_answers = [options_map.get(idx, None) for idx in selected_answers]
+    
+    # Encode the debug image to base64
+    _, buffer = cv2.imencode('.jpg', paper)
+    img_base64 = base64.b64encode(buffer).decode('utf-8')
+    
+    return final_answers, img_base64
 
 
 class AnswerInsert(BaseModel):
@@ -230,7 +275,7 @@ async def upload_omr(
         image_bytes = await file.read()
         try:
             # Assuming 4 choices (A, B, C, D) per question
-            selected_options = process_omr_image(image_bytes, num_questions=num_questions, num_choices=4)
+            selected_options, processed_image_base64 = process_omr_image(image_bytes, num_questions=num_questions, num_choices=4)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Error processing OMR image: {str(e)}")
 
@@ -268,7 +313,8 @@ async def upload_omr(
             exam_id=exam_id,
             total_marks=total_marks,
             obtained_marks=obtained_marks,
-            results=results
+            results=results,
+            processed_image_base64=processed_image_base64
         )
 
     except Exception as e:
