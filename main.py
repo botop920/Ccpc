@@ -99,8 +99,8 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
     paper = cv2.resize(paper, (800, 1131))
 
     # 5. Thresholding (binarization)
-    # Use Adaptive Thresholding to handle uneven lighting in photos
-    thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 15)
+    # Simple thresholding is often better for PDFs/scans than adaptive
+    thresh = cv2.threshold(warped, 150, 255, cv2.THRESH_BINARY_INV)[1]
 
     # 6. Find all circular contours (bubbles)
     cnts = cv2.findContours(thresh.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -128,17 +128,15 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
         if not is_duplicate:
             questionCnts.append(c)
 
-    if len(questionCnts) == 0:
-        # Return the THRESHOLDED image so the user can see exactly what went wrong
-        # If this is completely black or white, the thresholding failed.
-        debug_img = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
-        cv2.putText(debug_img, "Error: No bubbles found. Showing Threshold Image.", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        _, buffer = cv2.imencode('.jpg', debug_img)
-        img_base64 = base64.b64encode(buffer).decode('utf-8')
-        return [], img_base64
-
     # Draw ALL detected bubbles in RED for debugging
     cv2.drawContours(paper, questionCnts, -1, (0, 0, 255), 2)
+
+    if len(questionCnts) < 100:
+        # If we didn't find enough bubbles, return the image showing what we DID find
+        cv2.putText(paper, f"Error: Only found {len(questionCnts)} bubbles.", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        _, buffer = cv2.imencode('.jpg', paper)
+        img_base64 = base64.b64encode(buffer).decode('utf-8')
+        return [], img_base64
 
     # 7. Sort and Group into 4 Columns (25 questions each)
     selected_answers = []
