@@ -62,47 +62,19 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
         raise ValueError("Could not decode image")
 
     # 2. Preprocessing
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blurred, 75, 200)
-
-    # 3. Find the document (paper)
-    cnts = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = imutils.grab_contours(cnts)
-    docCnt = None
-
-    if len(cnts) > 0:
-        cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-        for c in cnts:
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            if len(approx) == 4:
-                docCnt = approx
-                break
-
-    if docCnt is None:
-        # Fallback: assume the whole image is the document
-        height, width = image.shape[:2]
-        docCnt = np.array([
-            [[0, 0]],
-            [[width - 1, 0]],
-            [[width - 1, height - 1]],
-            [[0, height - 1]]
-        ])
-
-    # 4. Apply perspective transform
-    paper = four_point_transform(image, docCnt.reshape(4, 2))
-    warped = four_point_transform(gray, docCnt.reshape(4, 2))
+    # Skip document detection completely. Assume the uploaded image IS the document.
+    # This prevents the "full black image" issue caused by bad cropping.
+    paper = image.copy()
     
     # Resize to a standard size to make bubble detection consistent
-    warped = cv2.resize(warped, (800, 1131)) # A4 ratio
-    paper = cv2.resize(paper, (800, 1131))
+    paper = cv2.resize(paper, (800, 1131)) # A4 ratio
+    gray = cv2.cvtColor(paper, cv2.COLOR_BGR2GRAY)
 
-    # 5. Thresholding (binarization)
-    # Simple thresholding is often better for PDFs/scans than adaptive
-    thresh = cv2.threshold(warped, 150, 255, cv2.THRESH_BINARY_INV)[1]
+    # 3. Thresholding (binarization)
+    # Simple thresholding for scanned PDFs
+    thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)[1]
 
-    # 6. Find all circular contours (bubbles)
+    # 4. Find all circular contours (bubbles)
     cnts = cv2.findContours(thresh.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     cnts = imutils.grab_contours(cnts)
     
