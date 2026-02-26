@@ -111,7 +111,8 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
         (x, y, w, h) = cv2.boundingRect(c)
         ar = w / float(h)
         # Filter for bubbles: roughly circular, specific size range
-        if 10 <= w <= 50 and 10 <= h <= 50 and 0.6 <= ar <= 1.4:
+        # Made extremely forgiving to just find ANYTHING circular
+        if 5 <= w <= 80 and 5 <= h <= 80 and 0.5 <= ar <= 1.5:
             raw_bubbles.append(c)
 
     # Remove duplicate contours (inner/outer rings of the same bubble)
@@ -121,16 +122,18 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
         is_duplicate = False
         for qc in questionCnts:
             (qx, qy, qw, qh) = cv2.boundingRect(qc)
-            if abs(x - qx) < 10 and abs(y - qy) < 10:
+            if abs(x - qx) < 5 and abs(y - qy) < 5:
                 is_duplicate = True
                 break
         if not is_duplicate:
             questionCnts.append(c)
 
     if len(questionCnts) == 0:
-        # Return the original paper image with a message so the user can see what went wrong
-        cv2.putText(paper, "Error: No bubbles found. Lighting or focus issue?", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        _, buffer = cv2.imencode('.jpg', paper)
+        # Return the THRESHOLDED image so the user can see exactly what went wrong
+        # If this is completely black or white, the thresholding failed.
+        debug_img = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+        cv2.putText(debug_img, "Error: No bubbles found. Showing Threshold Image.", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        _, buffer = cv2.imencode('.jpg', debug_img)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
         return [], img_base64
 
