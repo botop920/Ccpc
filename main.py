@@ -99,7 +99,8 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
     paper = cv2.resize(paper, (800, 1131))
 
     # 5. Thresholding (binarization)
-    thresh = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    # Use Adaptive Thresholding to handle uneven lighting in photos
+    thresh = cv2.adaptiveThreshold(warped, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 51, 15)
 
     # 6. Find all circular contours (bubbles)
     cnts = cv2.findContours(thresh.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -110,7 +111,7 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
         (x, y, w, h) = cv2.boundingRect(c)
         ar = w / float(h)
         # Filter for bubbles: roughly circular, specific size range
-        if 10 <= w <= 45 and 10 <= h <= 45 and 0.6 <= ar <= 1.4:
+        if 10 <= w <= 50 and 10 <= h <= 50 and 0.6 <= ar <= 1.4:
             raw_bubbles.append(c)
 
     # Remove duplicate contours (inner/outer rings of the same bubble)
@@ -127,8 +128,9 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
             questionCnts.append(c)
 
     if len(questionCnts) == 0:
-        # Return the thresholded image so the user can see what went wrong
-        _, buffer = cv2.imencode('.jpg', thresh)
+        # Return the original paper image with a message so the user can see what went wrong
+        cv2.putText(paper, "Error: No bubbles found. Lighting or focus issue?", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        _, buffer = cv2.imencode('.jpg', paper)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
         return [], img_base64
 
@@ -193,8 +195,9 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
                 if bubbled is None or total > bubbled[0]:
                     bubbled = (total, j, c)
                     
-            # Threshold for "filled" bubble (e.g., at least 120 pixels filled)
-            if bubbled is not None and bubbled[0] > 120:
+            # Threshold for "filled" bubble (adaptive thresholding makes filled bubbles have many white pixels)
+            # A circle of diameter 20 has ~314 pixels. Let's say at least 40 pixels must be white.
+            if bubbled is not None and bubbled[0] > 40:
                 selected_answers.append(bubbled[1])
                 # Draw the selected bubble in GREEN
                 cv2.drawContours(paper, [bubbled[2]], -1, (0, 255, 0), 3)
