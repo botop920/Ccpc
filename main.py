@@ -104,53 +104,73 @@ def process_omr_image(image_bytes: bytes, num_questions: int, num_choices: int =
         (x, y, w, h) = cv2.boundingRect(c)
         ar = w / float(h)
         # Filter contours based on size and aspect ratio to find bubbles
-        if w >= 20 and h >= 20 and ar >= 0.9 and ar <= 1.1:
+        # Made more forgiving for different image sizes and resolutions
+        if w >= 15 and h >= 15 and ar >= 0.7 and ar <= 1.3:
             questionCnts.append(c)
 
-    # Note: A real OMR system needs robust sorting of bubbles into rows (questions)
-    # and columns (options). This is a simplified sorting logic assuming a single column of questions.
-    # Sort contours top-to-bottom
     if len(questionCnts) == 0:
-        raise ValueError("No bubbles found on the OMR sheet.")
-        
-    # We sort by Y coordinate to get questions in order
-    questionCnts = sorted(questionCnts, key=lambda c: cv2.boundingRect(c)[1])
-    
-    # Group into rows (questions)
-    # This assumes bubbles are perfectly aligned. In reality, you'd use a more robust grouping.
-    # We expect num_questions * num_choices bubbles.
-    
-    # For simplicity in this example, we will just return a mock list of selected indices
-    # if the exact number of bubbles isn't found, as robust OMR requires a specific template.
+        raise ValueError("No bubbles found on the OMR sheet. Please ensure the image is clear and the OMR format is supported.")
+
+    # Sort contours top-to-bottom
+    from imutils import contours
+    questionCnts = contours.sort_contours(questionCnts, method="top-to-bottom")[0]
     
     selected_answers = []
     
-    # MOCK LOGIC: In a real scenario, you iterate through each row, find the bubble with 
-    # the most non-zero pixels in the thresholded image, and that's the selected answer.
-    # Here we simulate finding answers for demonstration, but include the real OpenCV logic structure above.
+    # Group bubbles into rows based on Y-coordinate proximity
+    rows = []
+    current_row = [questionCnts[0]]
     
-    # Real logic snippet (assuming questionCnts is perfectly sorted into rows):
-    # for (q, i) in enumerate(np.arange(0, len(questionCnts), num_choices)):
-    #     cnts = sorted(questionCnts[i:i + num_choices], key=lambda c: cv2.boundingRect(c)[0])
-    #     bubbled = None
-    #     for (j, c) in enumerate(cnts):
-    #         mask = np.zeros(thresh.shape, dtype="uint8")
-    #         cv2.drawContours(mask, [c], -1, 255, -1)
-    #         mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-    #         total = cv2.countNonZero(mask)
-    #         if bubbled is None or total > bubbled[0]:
-    #             bubbled = (total, j)
-    #     selected_answers.append(bubbled[1]) # Index of selected option (0=A, 1=B, etc.)
-
-    # Mocking the extraction for now to ensure the API works even if the image isn't a perfect OMR sheet
-    print(f"Found {len(questionCnts)} potential bubbles.")
-    for i in range(num_questions):
-        # Randomly select an answer for demonstration if real logic fails
-        # Replace this with the real logic snippet above when using a proper OMR template
-        selected_answers.append(np.random.randint(0, num_choices))
+    for c in questionCnts[1:]:
+        _, y1, _, h1 = cv2.boundingRect(current_row[-1])
+        _, y2, _, _ = cv2.boundingRect(c)
+        
+        # If the Y difference is small, they belong to the same row
+        if abs(y1 - y2) < (h1 / 1.5):
+            current_row.append(c)
+        else:
+            rows.append(current_row)
+            current_row = [c]
+    rows.append(current_row)
+    
+    # Process each row to find the filled bubble
+    for i, row in enumerate(rows):
+        if i >= num_questions:
+            break # Stop if we've processed all questions
+            
+        # Sort the row left-to-right (A, B, C, D)
+        row = contours.sort_contours(row, method="left-to-right")[0]
+        
+        bubbled = None
+        
+        for (j, c) in enumerate(row):
+            if j >= num_choices:
+                break # Only look at the first `num_choices` bubbles
+                
+            # Create a mask for the current bubble
+            mask = np.zeros(thresh.shape, dtype="uint8")
+            cv2.drawContours(mask, [c], -1, 255, -1)
+            
+            # Apply the mask to the thresholded image and count non-zero pixels
+            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
+            total = cv2.countNonZero(mask)
+            
+            # If the current bubble has more filled pixels than the previous max, update it
+            if bubbled is None or total > bubbled[0]:
+                bubbled = (total, j)
+                
+        # Append the index of the most filled bubble
+        if bubbled is not None:
+            selected_answers.append(bubbled[1])
+        else:
+            selected_answers.append(-1)
+            
+    # Pad with -1 if we didn't find enough rows
+    while len(selected_answers) < num_questions:
+        selected_answers.append(-1)
 
     # Map indices to letters (0 -> A, 1 -> B, etc.)
-    options_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E"}
+    options_map = {0: "A", 1: "B", 2: "C", 3: "D", 4: "E", -1: None}
     return [options_map.get(idx, None) for idx in selected_answers]
 
 
