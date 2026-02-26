@@ -154,6 +154,38 @@ def process_omr_image(image_bytes: bytes, num_questions: int, num_choices: int =
     return [options_map.get(idx, None) for idx in selected_answers]
 
 
+class AnswerInsert(BaseModel):
+    question_id: str
+    selected_option: Optional[str]
+    is_correct: bool
+    marks_obtained: float
+
+class SaveResultsRequest(BaseModel):
+    submission_id: str
+    answers: List[AnswerInsert]
+
+@app.post("/save-results")
+async def save_results(request: SaveResultsRequest):
+    try:
+        supabase = get_supabase()
+        answers_to_insert = []
+        for ans in request.answers:
+            answers_to_insert.append({
+                # Omitting submission_id to avoid the foreign key constraint error you faced earlier
+                "question_id": ans.question_id,
+                "selected_option": ans.selected_option,
+                "is_correct": ans.is_correct,
+                "marks_obtained": ans.marks_obtained
+            })
+        
+        if answers_to_insert:
+            supabase.table("student_answers").insert(answers_to_insert).execute()
+            
+        return {"message": "Results saved successfully"}
+    except Exception as e:
+        print(f"Save Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/upload-omr", response_model=GradingResponse)
 async def upload_omr(
     exam_id: str = Form(...),
@@ -171,7 +203,6 @@ async def upload_omr(
             raise HTTPException(status_code=404, detail="No questions found for this exam.")
             
         # Sort questions by created_at or a specific order field if you have one
-        # Assuming they are ordered correctly
         questions = sorted(questions, key=lambda q: q.get('created_at', ''))
         num_questions = len(questions)
         
@@ -187,9 +218,6 @@ async def upload_omr(
         results = []
         total_marks = 0.0
         obtained_marks = 0.0
-        
-        # Prepare data for bulk insert into student_answers
-        answers_to_insert = []
 
         for i, question in enumerate(questions):
             q_id = question["id"]
@@ -202,7 +230,6 @@ async def upload_omr(
             is_correct = (selected_opt == correct_ans) if selected_opt else False
             
             marks_awarded = marks if is_correct else 0.0
-            # Handle negative marking if needed (fetch from exams table)
             
             total_marks += marks
             obtained_marks += marks_awarded
@@ -215,24 +242,8 @@ async def upload_omr(
                 correct_answer=correct_ans or ""
             )
             results.append(result)
-            
-            answers_to_insert.append({
-                "submission_id": submission_id,
-                "question_id": q_id,
-                "selected_option": selected_opt,
-                "is_correct": is_correct,
-                "marks_obtained": marks_awarded
-            })
 
-        # 4. Save results to Supabase student_answers table
-        if answers_to_insert:
-            # We remove submission_id to avoid foreign key constraint errors 
-            # if the student_submissions table doesn't exist or the ID is invalid.
-            for ans in answers_to_insert:
-                if "submission_id" in ans:
-                    del ans["submission_id"]
-            supabase.table("student_answers").insert(answers_to_insert).execute()
-
+        # We no longer save to the database here. It will be done via /save-results
         return GradingResponse(
             exam_id=exam_id,
             total_marks=total_marks,
