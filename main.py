@@ -160,17 +160,22 @@ def process_omr_image(image_bytes: bytes, num_questions: int = 100, num_choices:
             for (j, c) in enumerate(row):
                 if j >= num_choices: break
                 
-                mask = np.zeros(thresh.shape, dtype="uint8")
+                # Create a mask for the current bubble
+                mask = np.zeros(gray.shape, dtype="uint8")
                 cv2.drawContours(mask, [c], -1, 255, -1)
-                mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-                total = cv2.countNonZero(mask)
                 
-                if bubbled is None or total > bubbled[0]:
-                    bubbled = (total, j, c)
+                # Calculate average pixel intensity inside the bubble (0 = black, 255 = white)
+                mean_val = cv2.mean(gray, mask=mask)[0]
+                
+                # We want the DARKEST bubble, which means the LOWEST mean_val
+                if bubbled is None or mean_val < bubbled[0]:
+                    bubbled = (mean_val, j, c)
                     
-            # Threshold for "filled" bubble (adaptive thresholding makes filled bubbles have many white pixels)
-            # A circle of diameter 20 has ~314 pixels. Let's say at least 40 pixels must be white.
-            if bubbled is not None and bubbled[0] > 40:
+            # Threshold for "filled" bubble
+            # Empty bubbles are mostly white inside (high mean_val, e.g., 230-255)
+            # Filled bubbles are dark (low mean_val, e.g., 50-180)
+            # We use < 220 to be very forgiving for light pencils or blue pens
+            if bubbled is not None and bubbled[0] < 220:
                 selected_answers.append(bubbled[1])
                 # Draw the selected bubble in GREEN
                 cv2.drawContours(paper, [bubbled[2]], -1, (0, 255, 0), 3)
